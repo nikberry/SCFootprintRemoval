@@ -13,7 +13,7 @@
 //
 // Original Author:  Marco Peruzzi,32 4-C16,+41227676829,
 //         Created:  Sat Sep 29 17:58:21 CEST 2012
-// $Id: SuperClusterFootprintRemoval.cc,v 1.10 2013/05/15 12:57:16 peruzzi Exp $
+// $Id: SuperClusterFootprintRemoval.cc,v 1.11 2013/05/24 12:17:39 peruzzi Exp $
 //
 //
 
@@ -22,8 +22,6 @@
 #define __SUPERCLUSTERFOOTPRINTREMOVAL__CC__
 
 #include "../interface/SuperClusterFootprintRemoval.h"
-
-using namespace std;
 
 //
 // constructors and destructor
@@ -50,12 +48,18 @@ SuperClusterFootprintRemoval::SuperClusterFootprintRemoval(const edm::Event& iEv
   edm::InputTag pfCandidateTag = iConfig.getUntrackedParameter<edm::InputTag>("tag_pfCandidates_forSCremoval",edm::InputTag("particleFlow"));
   iEvent.getByLabel(pfCandidateTag, pfCandidates);
 
+  //Vertices
+  edm::InputTag fVertexTag = iConfig.getUntrackedParameter<edm::InputTag>("tag_Vertices_forSCremoval",edm::InputTag("offlinePrimaryVertices"));
+  iEvent.getByLabel(fVertexTag, vertexHandle);
+
   //Photons
   iEvent.getByLabel("photons", photonHandle);
 
   //Jets
-  edm::InputTag jetTag = iConfig.getUntrackedParameter<edm::InputTag>("tag_jets",edm::InputTag("ak5PFJets"));
-  iEvent.getByLabel(jetTag, jetHandle);
+  iEvent.getByLabel("ak5PFJets", jetHandle);
+
+  //Muons
+  iEvent.getByLabel("muons", muonHandle);
 
   randomgen = new TRandom3(0);
 
@@ -81,22 +85,22 @@ SuperClusterFootprintRemoval::~SuperClusterFootprintRemoval()
 TVector3 SuperClusterFootprintRemoval::PropagatePFCandToEcal(int pfcandindex, float position, bool isbarrel){
   // WARNING: this propagates until EE+ or EE- at the given TMath::Abs(position.z()) for isbarrel=0, depending on where the candidate is pointing.
 
-  int type = FindPFCandType((*pfCandidates)[pfcandindex].pdgId());
-
   if (!((*pfCandidates)[pfcandindex].pt()>0)) {
     std::cout << "Warning: called propagation to ECAL for object with negative or zero pt. Returning TVector3(0,0,1e10)." << std::endl;
     return TVector3(0,0,1e10);
   }
+
+  int i = pfcandindex;
+  int type = FindPFCandType((*pfCandidates)[i].pdgId());
 
   if (type>2) {
     std::cout << "Asking propagation for lepton, not implemented. Returning TVector3(0,0,1e10)." << std::endl;
     return TVector3(0,0,1e10);
   }
 
-  TVector3 pfvertex((*pfCandidates)[pfcandindex].vx(),(*pfCandidates)[pfcandindex].vy(),(*pfCandidates)[pfcandindex].vz());
-  TVector3 pfmomentum((*pfCandidates)[pfcandindex].px(),(*pfCandidates)[pfcandindex].py(),(*pfCandidates)[pfcandindex].pz());
+  TVector3 pfvertex((*pfCandidates)[i].vx(),(*pfCandidates)[i].vy(),(*pfCandidates)[i].vz());
+  TVector3 pfmomentum((*pfCandidates)[i].px(),(*pfCandidates)[i].py(),(*pfCandidates)[i].pz());
   pfmomentum = pfmomentum.Unit();
-
   TVector3 ecalpfhit(0,0,0);
   if (isbarrel){
     double p[3] = {pfvertex.x(),pfvertex.y(),pfvertex.z()};
@@ -113,10 +117,12 @@ TVector3 SuperClusterFootprintRemoval::PropagatePFCandToEcal(int pfcandindex, fl
     ecalpfhit = pfvertex + dist*pfmomentum;
   }
 
+
   if (type==1){ // APPROXIMATE helix propagation
+
     float field = magField->inTesla(GlobalPoint(0.,0.,0.)).z();
-    float charge = (*pfCandidates)[pfcandindex].charge();
-    float curvature = ((*pfCandidates)[pfcandindex].pt())/(0.3*field*charge)*100; // curvature radius in cm
+    float charge = (*pfCandidates)[i].charge();
+    float curvature = ((*pfCandidates)[i].pt())/(0.3*field*charge)*100; // curvature radius in cm
     float final_radius = ecalpfhit.Perp();
     float addphi = -TMath::ASin(final_radius/curvature/2);
 
@@ -125,6 +131,7 @@ TVector3 SuperClusterFootprintRemoval::PropagatePFCandToEcal(int pfcandindex, fl
     ecalpfhit *= r;
 
   }
+
 
   return ecalpfhit;
 
@@ -192,32 +199,43 @@ sc_xtal_information SuperClusterFootprintRemoval::GetSCXtalInfo(reco::SuperClust
 
 }
 
-bool SuperClusterFootprintRemoval::CheckMatchedPFCandidate(int i){
+std::vector<int> SuperClusterFootprintRemoval::GetMatchedPFCandidates(reco::SuperClusterRef sc){
 
-  if ((*pfCandidates)[i].pdgId()==22) {
-    if ((*pfCandidates)[i].mva_nothing_gamma()>0){
-      if( (*pfCandidates)[i].superClusterRef()==sc) {
-	return true;
+  std::vector<int> out;
+
+  for (unsigned int i=0; i<pfCandidates->size(); i++) {
+    if ((*pfCandidates)[i].pdgId()==22) {
+      if ((*pfCandidates)[i].mva_nothing_gamma()>0){
+	if( (*pfCandidates)[i].superClusterRef()==sc) {
+	  out.push_back(i);
+	}
       }
     }
   }
-  
-  return false;
+
+  return out;
 
 }
 
-bool SuperClusterFootprintRemoval::CheckPFCandInFootprint(int i, float rotation_phi){
+std::vector<int> SuperClusterFootprintRemoval::GetPFCandInFootprint(reco::SuperClusterRef sc, float rotation_phi){
 
   bool isbarrel = (fabs(sc->eta())<1.5);
 
-  if (CheckMatchedPFCandidate(i)) return true;
+  sc_xtal_information infos = GetSCXtalInfo(sc);
+  std::vector<int> matchedpfcand = GetMatchedPFCandidates(sc);
 
-  if (!((*pfCandidates)[i].pt()>0)) return false;
+  std::vector<int> result;
+
+  for (unsigned int i=0; i<pfCandidates->size(); i++){
+
+    if (!((*pfCandidates)[i].pt()>0)) continue;
 
     int type = FindPFCandType((*pfCandidates)[i].pdgId());
-    if (type>2) return false;
+    if (type>2) continue;
 
     bool inside=false;
+
+    for (unsigned int j=0; j<matchedpfcand.size(); j++) if ((int)i==matchedpfcand.at(j)) inside=true;
 
     for (int j=0; j<infos.nxtals; j++){
       
@@ -226,11 +244,11 @@ bool SuperClusterFootprintRemoval::CheckPFCandInFootprint(int i, float rotation_
 	TRotation r; r.RotateZ(rotation_phi);
 	xtal_position *= r;
       }
-      
+
       TVector3 ecalpfhit = PropagatePFCandToEcal(i,isbarrel ? xtal_position.Perp() : xtal_position.z(), isbarrel);
 
       if (ecalpfhit.Perp()==0) continue;
-      
+
       if (isbarrel){
 	float xtalEtaWidth = infos.xtaletawidth[j]*(1.0+global_linkbyrechit_enlargement);
 	float xtalPhiWidth = infos.xtalphiwidth[j]*(1.0+global_linkbyrechit_enlargement);
@@ -242,10 +260,6 @@ bool SuperClusterFootprintRemoval::CheckPFCandInFootprint(int i, float rotation_
 	if (ecalpfhit.z()*xtal_position.z()>0){
 	  TVector3 xtal_corners[4];
 	  for (int k=0; k<4; k++) xtal_corners[k] = infos.xtalcorners[j][k];
-	  if (rotation_phi!=0) {
-            TRotation r; r.RotateZ(rotation_phi);
-            for (int k=0; k<4; k++) xtal_corners[k] *= r;
-          }
 	  float hitx = ecalpfhit.x();
 	  float hity = ecalpfhit.y();
 	  float polx[5];
@@ -260,17 +274,22 @@ bool SuperClusterFootprintRemoval::CheckPFCandInFootprint(int i, float rotation_
 	  if (TMath::IsInside(hitx,hity,5,polx,poly)) inside=true;
 	}
       }
-      
+
     }
 
-    return inside;
+    if (inside) result.push_back(i);
+
+  }
+
+  return result;
 
 }
 
 
-angular_distances_struct SuperClusterFootprintRemoval::GetPFCandHitDistanceFromSC(int pfindex, float rotation_phi){
+angular_distances_struct SuperClusterFootprintRemoval::GetPFCandHitDistanceFromSC(reco::SuperClusterRef sc, int pfindex, float rotation_phi){
 
-  int type = FindPFCandType((*pfCandidates)[pfindex].pdgId());
+  int i = pfindex;
+  int type = FindPFCandType((*pfCandidates)[i].pdgId());
 
   if (type>2) {
     std::cout << "propagation not implemented for lepton objects!!!" << std::endl;
@@ -287,7 +306,11 @@ angular_distances_struct SuperClusterFootprintRemoval::GetPFCandHitDistanceFromS
     sc_position *= r;
   }
 
-  TVector3 ecalpfhit = PropagatePFCandToEcal(pfindex,isbarrel ? sc_position.Perp() : sc_position.z(),isbarrel);
+  TVector3 pfvertex((*pfCandidates)[i].vx(),(*pfCandidates)[i].vy(),(*pfCandidates)[i].vz());
+  TVector3 pfmomentum((*pfCandidates)[i].px(),(*pfCandidates)[i].py(),(*pfCandidates)[i].pz());
+  pfmomentum = pfmomentum.Unit();
+
+  TVector3 ecalpfhit = PropagatePFCandToEcal(i,isbarrel ? sc_position.Perp() : sc_position.z(),isbarrel);
 
   if (ecalpfhit.Perp()==0){
     std::cout << "GetPFCandHitDistanceFromSC: impact position found in the origin of the transverse plane. Returning error state." << std::endl;
@@ -320,76 +343,63 @@ int SuperClusterFootprintRemoval::FindPFCandType(int id){
   return type;
 }
 
-PFIsolation_struct SuperClusterFootprintRemoval::PFIsolation(reco::SuperClusterRef sc_, edm::Ptr<reco::Vertex> vertexforchargediso){
-  return PFIsolation_worker(sc_,vertexforchargediso);
-}
+float SuperClusterFootprintRemoval::PFIsolation(TString component, reco::SuperClusterRef sc, int vertexforchargediso, float rotation_phi){
 
-PFIsolation_struct SuperClusterFootprintRemoval::PFIsolation_worker(reco::SuperClusterRef sc_, edm::Ptr<reco::Vertex> vertexforchargediso, float rotation_phi, bool is_recursive_rcone){
-
-  if (!is_recursive_rcone){
-    sc = sc_;
-    infos = GetSCXtalInfo(sc);
+  if (component!="charged") {
+    if (vertexforchargediso!=-999) std::cout << "WARNING: Why are you specifying a vertex for neutral or photon isolation? This will be ignored." << std::endl;
+    vertexforchargediso=-1;
   }
 
-  PFIsolation_struct out;
-  out.chargediso=0;
-  out.chargediso_primvtx=0;
-  out.neutraliso=0;
-  out.photoniso=0;
-  out.chargediso_rcone=999;
-  out.chargediso_primvtx_rcone=999;
-  out.neutraliso_rcone=999;
-  out.photoniso_rcone=999;
-  out.eta_rcone=999;
-  out.phi_rcone=999;
-  out.rcone_isOK=false;
-  
-  bool isbarrel = (fabs(sc->eta())<1.5);
+  if (component=="charged") {
+      if (vertexforchargediso==-999) {std::cout << "WARNING: You did not specify a vertex for the charged component of PF isolation. Deactivating vertex cuts (vertexforchargediso=-1) by default." << std::endl; vertexforchargediso=-1;}
+      if (vertexforchargediso > (int)(vertexHandle->size())-1 || vertexforchargediso<-1) {std::cout << "ERROR: Invalid vertexforchargediso specified. Returning 999." << std::endl; return 999;}
+    }
+
+  float result = 0;
+  std::vector<int> removed = GetPFCandInFootprint(sc,rotation_phi);
+
+  int thistype=-999;
+  if (component=="neutral") thistype=0;
+  if (component=="charged") thistype=1;
+  if (component=="photon")  thistype=2;
+
+  if (thistype==-999) {std::cout << "ERROR: Incorrect PF isolation component selected. Returning 999." << std::endl; return 999;}
 
   for (unsigned int i=0; i<pfCandidates->size(); i++){
 
     if (!((*pfCandidates)[i].pt()>0)) continue;
 
-    float pfcandabseta = fabs((*pfCandidates)[i].eta());
-    if (pfcandabseta>2.5) continue;
-    if (isbarrel && pfcandabseta>1.4442) continue;
-    if (!isbarrel && pfcandabseta<1.566) continue;
-
     int type = FindPFCandType((*pfCandidates)[i].pdgId());
-    if (type>2) continue;
+    if (type!=thistype) continue;
 
-    angular_distances_struct distance = GetPFCandHitDistanceFromSC(i,rotation_phi);
+    angular_distances_struct distance = GetPFCandHitDistanceFromSC(sc,i,rotation_phi);
     if (distance.dR>global_isolation_cone_size) continue;
 
-    if (CheckPFCandInFootprint(i,rotation_phi)) {
-      out.pfcandindex_footprint.push_back(i); 
-      continue;
-    }
+    bool toremove = false;
+    for (unsigned int j=0; j<removed.size(); j++) if ((int)i==removed.at(j)) toremove = true;
+    if (toremove) continue;
 
-    if (type==0) out.neutraliso+=(*pfCandidates)[i].pt();
-    if (type==1) out.chargediso+=(*pfCandidates)[i].pt();
-    if (type==2) out.photoniso+=(*pfCandidates)[i].pt();
-
-    if (type==1 && vertexforchargediso.isNonnull()){
+    if (type==1 && vertexforchargediso>-1){
       TVector3 pfvertex((*pfCandidates)[i].vx(),(*pfCandidates)[i].vy(),(*pfCandidates)[i].vz());
       TVector3 vtxmom((*pfCandidates)[i].trackRef()->px(),(*pfCandidates)[i].trackRef()->py(),(*pfCandidates)[i].trackRef()->pz());
-      TVector3 phovtx(vertexforchargediso.get()->x(),vertexforchargediso.get()->y(),vertexforchargediso.get()->z());
+      TVector3 phovtx((*vertexHandle)[vertexforchargediso].x(),(*vertexHandle)[vertexforchargediso].y(),(*vertexHandle)[vertexforchargediso].z());
       float dxy = ( -(pfvertex.x()-phovtx.x())*vtxmom.y() +(pfvertex.y()-phovtx.y())*vtxmom.x() ) / vtxmom.Perp();
       float dz = (pfvertex.z()-phovtx.z()) - ( (pfvertex.x()-phovtx.x())*vtxmom.x() + (pfvertex.y()-phovtx.y())*vtxmom.y() ) / vtxmom.Perp() * vtxmom.z() / vtxmom.Perp();
       dxy=fabs(dxy);
       dz=fabs(dz);
-      if (dz<0.2 && dxy<0.1) out.chargediso_primvtx+=(*pfCandidates)[i].pt();
+      if (dz>0.2) continue;
+      if (dxy>0.1) continue;
     }
+
+    result+=(*pfCandidates)[i].pt();
 
   }
 
-  if (!is_recursive_rcone) RandomConeIsolation(vertexforchargediso,&out);
-
-  return out;
+  return result;
 
 }
 
-bool SuperClusterFootprintRemoval::FindCloseJetsAndPhotons(float rotation_phi){
+bool SuperClusterFootprintRemoval::FindCloseJetsAndPhotons(reco::SuperClusterRef sc, float rotation_phi){
 
   TVector3 photon_position = TVector3(sc->x(),sc->y(),sc->z());
   if (rotation_phi!=0) {
@@ -414,46 +424,41 @@ bool SuperClusterFootprintRemoval::FindCloseJetsAndPhotons(float rotation_phi){
     if (dR<mindR) found=true;
   }
 
+  for (reco::MuonCollection::const_iterator muon=muonHandle->begin(); muon!=muonHandle->end(); muon++){
+    float mueta = muon->eta();
+    float muphi = muon->phi();
+    if (reco::deltaR(mueta,muphi,eta,phi)<0.4) found=true;
+  }
+
   return found;
 
 }
 
-void SuperClusterFootprintRemoval::RandomConeIsolation(edm::Ptr<reco::Vertex> vertexforchargediso, PFIsolation_struct *output){
+float SuperClusterFootprintRemoval::RandomConeIsolation(TString component, reco::SuperClusterRef sc, int vertexforchargediso){
 
   const double pi = TMath::Pi();
 
   double rotation_phi = pi/2;
 
-  bool isok = !(FindCloseJetsAndPhotons(rotation_phi));
+  bool isok = !(FindCloseJetsAndPhotons(sc,rotation_phi));
   if (!isok) {
     rotation_phi = -pi/2;
-    isok=!(FindCloseJetsAndPhotons(rotation_phi));
+    isok=!(FindCloseJetsAndPhotons(sc,rotation_phi));
   }
 
   int count=0;
   while (!isok && count<20) {
     rotation_phi = randomgen->Uniform(0.8,2*pi-0.8);
-    isok=!(FindCloseJetsAndPhotons(rotation_phi));
+    isok=!(FindCloseJetsAndPhotons(sc,rotation_phi));
     count++;
   }
 
   if (count==20){
     //    std::cout << "It was not possible to find a suitable direction for the random cone in this event. This is not a problem."  << std::endl;
-    return;
+    return -999;
   };
 
-  PFIsolation_struct temp = PFIsolation_worker(sc,vertexforchargediso,rotation_phi,true);
-  output->chargediso_rcone = temp.chargediso;
-  output->chargediso_primvtx_rcone = temp.chargediso_primvtx;
-  output->neutraliso_rcone = temp.neutraliso;
-  output->photoniso_rcone = temp.photoniso;
-  
-  output->eta_rcone=TVector3(sc->x(),sc->y(),sc->z()).Eta();
-  float newphi = TVector3(sc->x(),sc->y(),sc->z()).Phi()+rotation_phi;
-  while (newphi>pi) newphi-=2*pi;
-  while (newphi<-pi) newphi+=2*pi;
-  output->phi_rcone=newphi;
-  output->rcone_isOK = true;
+  return PFIsolation(component,sc,vertexforchargediso,rotation_phi);
 
 }
 
